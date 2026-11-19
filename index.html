@@ -20,8 +20,55 @@ Object.keys(specs).forEach(c=>el('classe').add(new Option(c,c)));
 function refreshSpecs(){let arr=specs[el('classe').value]||[];let prev=el('spec').value;el('spec').innerHTML='<option value="">Choisir une spécialisation</option>';el('offspec').innerHTML='<option value="">Choisir une spécialisation</option>';arr.forEach(s=>{el('spec').add(new Option(s,s));el('offspec').add(new Option(s,s))});if(arr.includes(prev))el('spec').value=prev}
 el('classe').addEventListener('change',refreshSpecs);document.querySelectorAll('input[name=offspecOui]').forEach(r=>r.addEventListener('change',()=>el('offspecBox').classList.toggle('hidden',document.querySelector('input[name=offspecOui]:checked')?.value!=='Oui')));
 document.querySelectorAll('input[name=presence]').forEach(r=>r.addEventListener('change',()=>el('details').classList.toggle('hidden',['Pause','Arrêt'].includes(document.querySelector('input[name=presence]:checked')?.value))));
-let pending=null;let lastAttempt=null;window.addEventListener('message',e=>{if(!pending||!['https://script.google.com','https://script.googleusercontent.com'].includes(e.origin))return;let d=e.data;if(!d||d.type!=='UTOPIA_S3_RESULT'||d.nonce!==pending.nonce)return;clearTimeout(pending.timer);let success=d.ok;pending=null;el('send').disabled=false;el('status').textContent=success?'✓ Réponse enregistrée ! Merci et à bientôt chez UTOPIA.':'Erreur lors de l’enregistrement : '+(d.error||'réessaie.');el('status').style.color=success?'#9efbc9':'#ffb7b7';if(success){lastAttempt=null;el('survey').reset();el('details').classList.remove('hidden');el('offspecBox').classList.add('hidden');el('spec').innerHTML='<option value="">Choisir d’abord une classe</option>';el('offspec').innerHTML='<option value="">Choisir une spécialisation</option>'}});
-el('survey').addEventListener('submit',e=>{e.preventDefault();if(pending)return;let pseudo=el('pseudo').value.trim(),presence=document.querySelector('input[name=presence]:checked')?.value;if(!pseudo||!presence){el('status').textContent='Renseigne ton pseudo et ta présence en S3.';return}if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(APPS_SCRIPT_URL)){el('status').textContent='Connexion Google Sheets non configurée : voir le guide INSTALLATION.md.';return}let fd=new FormData(el('survey'));let inactive=['Pause','Arrêt'].includes(presence);let obj={pseudo,presence,classe:inactive?'':fd.get('classe')||'',spec:inactive?'':fd.get('spec')||'',offspec:inactive?'':fd.get('offspecOui')==='Oui'?fd.get('offspec')||'':'',jours:inactive?[]:fd.getAll('jours'),ambition:inactive?'':fd.get('ambition')||'',objectif:inactive?'':fd.get('objectif')||'',activites:inactive?[]:fd.getAll('activites'),commentaire:fd.get('commentaire')||'',siteweb:fd.get('siteweb')||''};let fingerprint=JSON.stringify(obj);let nonce=(lastAttempt&&lastAttempt.fingerprint===fingerprint)?lastAttempt.nonce:(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random());lastAttempt={fingerprint,nonce};let f=document.createElement('form');f.method='POST';f.action=APPS_SCRIPT_URL;f.target='utopiaSink';f.style.display='none';let field=document.createElement('input');field.name='payload';field.value=JSON.stringify({...obj,nonce});f.appendChild(field);document.body.appendChild(f);el('send').disabled=true;el('status').textContent='Envoi en cours…';pending={nonce,timer:setTimeout(()=>{pending=null;el('send').disabled=false;el('status').textContent='La confirmation n’est pas arrivée. Vérifie l’onglet Réponses S3 avant de réessayer : l’enregistrement a peut-être réussi. Le même identifiant sera réutilisé pour limiter les doublons.'},20000)};f.submit();setTimeout(()=>f.remove(),1000)});
+let pending=null, lastAttempt=null;
+function finish(result){
+ if(!pending || result.nonce!==pending.nonce)return;
+ clearTimeout(pending.timer);clearInterval(pending.poller);
+ pending=null;el('send').disabled=false;
+ el('status').textContent=result.ok?'✓ Réponse enregistrée ! Merci et à bientôt chez UTOPIA.':'Erreur lors de l’enregistrement : '+(result.error||'Réessaie.');
+ el('status').style.color=result.ok?'#9efbc9':'#ffb7b7';
+ if(result.ok){lastAttempt=null;el('survey').reset();el('details').classList.remove('hidden');el('offspecBox').classList.add('hidden');el('spec').innerHTML='<option value="">Choisir d’abord une classe</option>';el('offspec').innerHTML='<option value="">Choisir une spécialisation</option>'}
+}
+// Le retour postMessage peut être bloqué par l'encapsulation Google Apps Script.
+window.addEventListener('message',e=>{
+ if(!pending||!['https://script.google.com','https://script.googleusercontent.com'].includes(e.origin))return;
+ let d=e.data;if(d&&d.type==='UTOPIA_S3_RESULT')finish(d);
+});
+// Vérification indépendante : Google Apps Script répond avec du JavaScript (JSONP).
+// Cela fonctionne même si le navigateur ne permet pas de lire la réponse du POST.
+let probeCounter=0;
+function checkReceipt(nonce){
+ if(!pending||pending.nonce!==nonce)return;
+ const cb='utopiaReceipt_'+(++probeCounter);
+ const s=document.createElement('script');let done=false;
+ const cleanup=()=>{if(done)return;done=true;delete window[cb];s.remove()};
+ window[cb]=r=>{cleanup();if(!pending||r.nonce!==nonce)return;if(r.found)finish({ok:true,nonce});};
+ s.src=APPS_SCRIPT_URL+'?action=receipt&nonce='+encodeURIComponent(nonce)+'&callback='+cb+'&t='+Date.now();
+ s.onerror=cleanup;
+ document.head.appendChild(s);
+ setTimeout(cleanup,4500);
+}
+el('survey').addEventListener('submit',e=>{
+ e.preventDefault();if(pending)return;
+ let pseudo=el('pseudo').value.trim(),presence=document.querySelector('input[name=presence]:checked')?.value;
+ if(!pseudo||!presence){el('status').textContent='Renseigne ton pseudo et ta présence en S3.';return}
+ if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(?:\?.*)?$/.test(APPS_SCRIPT_URL)){el('status').textContent='Connexion Google Sheets non configurée.';return}
+ let fd=new FormData(el('survey'));let inactive=['Pause','Arrêt'].includes(presence);
+ let obj={pseudo,presence,classe:inactive?'':fd.get('classe')||'',spec:inactive?'':fd.get('spec')||'',offspec:inactive?'':fd.get('offspecOui')==='Oui'?fd.get('offspec')||'':'',jours:inactive?[]:fd.getAll('jours'),ambition:inactive?'':fd.get('ambition')||'',objectif:inactive?'':fd.get('objectif')||'',activites:inactive?[]:fd.getAll('activites'),commentaire:fd.get('commentaire')||'',siteweb:fd.get('siteweb')||''};
+ let fingerprint=JSON.stringify(obj),nonce=lastAttempt&&lastAttempt.fingerprint===fingerprint?lastAttempt.nonce:(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random());
+ lastAttempt={fingerprint,nonce};
+ let f=document.createElement('form');f.method='POST';f.action=APPS_SCRIPT_URL;f.target='utopiaSink';f.style.display='none';
+ let field=document.createElement('input');field.name='payload';field.value=JSON.stringify({...obj,nonce});f.appendChild(field);document.body.appendChild(f);
+ el('send').disabled=true;el('status').textContent='Envoi en cours…';el('status').style.color='#bfeaff';
+ pending={nonce,timer:null,poller:null};
+ pending.poller=setInterval(()=>checkReceipt(nonce),2500);
+ pending.timer=setTimeout(()=>{
+   if(!pending||pending.nonce!==nonce)return;
+   clearInterval(pending.poller);pending=null;el('send').disabled=false;
+   el('status').textContent='Impossible de vérifier la confirmation. Consulte Réponses S3 avant de réessayer : le même identifiant évitera un doublon.';
+ },30000);
+ f.submit();setTimeout(()=>f.remove(),1000);
+});
 </script></body></html>
 
 
